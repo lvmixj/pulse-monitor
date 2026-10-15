@@ -1,0 +1,26 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.10'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip check
+      - run: python -m compileall -q pulse install.py tests
+      - run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: GNOME JavaScript syntax
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gjs
+          gjs -c 'const GLib = imports.gi.GLib; for (const path of ARGV) { const [, data] = GLib.file_get_contents(path); Reflect.parse(imports.byteArray.toString(data)); }' desktop/pulse-panel@local/extension.js desktop/pulse-panel@local/panel.js
