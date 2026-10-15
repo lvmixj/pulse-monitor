@@ -30,12 +30,15 @@ class InstallationTests(unittest.TestCase):
         self.python.chmod(0o755)
         self.config = self.base/'config'
         self.data = self.base/'data'
+        self.runtime = self.base/'runtime'
+        self.runtime.mkdir(mode=0o700)
         self.fake_bin = self.base/'bin'
         self.fake_bin.mkdir()
         (self.fake_bin/'systemctl').write_text('#!/bin/sh\nexit 0\n')
         (self.fake_bin/'systemctl').chmod(0o755)
         self.env = patch.dict(os.environ, {
             'XDG_CONFIG_HOME': str(self.config), 'XDG_DATA_HOME': str(self.data),
+            'XDG_RUNTIME_DIR': str(self.runtime),
             'PATH': str(self.fake_bin)+os.pathsep+os.environ['PATH'],
             'PULSE_TEST_ARGS': str(self.base/'args'),
         })

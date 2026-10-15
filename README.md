@@ -38,7 +38,7 @@
 sudo apt update
 sudo apt install git python3-venv python3-pip python3-gi \
   gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 \
-  gnome-shell-extension-appindicator fonts-noto-cjk libxcb-cursor0
+  gnome-shell-extension-appindicator fonts-noto-cjk libxcb-cursor0 libegl1
 ```
 
 数字顶栏需要在GNOME“扩展”应用中启用Ubuntu AppIndicators。NVIDIA指标使用本机驱动的`nvidia-smi`。
