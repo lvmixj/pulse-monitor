@@ -1,10 +1,10 @@
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 import os
 import subprocess
+import time
 
-from PySide6.QtCore import QPoint, QSettings, QSortFilterProxyModel, Qt, Signal
+from PySide6.QtCore import QPoint, QSettings, Qt, Signal, QTimer, QSize
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
@@ -14,19 +14,22 @@ from PySide6.QtWidgets import (
 
 from .charts import Chart, CoreGrid, UsageGauge
 from .collector import byte_text
-from .processes import ProcessModel
+from .processes import ProcessModel, ProcessSortProxy
 from .panel_config import FIELDS, read_panel
 from .desktop import desktop_entry
-from .theme import BASE, COLORS, MUTED
+from .theme import COLORS, THEMES, apply_theme, color as theme_color
+from .state import MonitorState
 
 ROOT = Path(__file__).resolve().parent.parent
 TITLES = {'cpu': 'CPU', 'memory': '内存', 'gpu': 'GPU', 'disk': '磁盘', 'network': '网络'}
 
 
-def label(text='', kind=None):
+def label(text='', kind=None, tone=None):
     w = QLabel(text)
     if kind:
         w.setObjectName(kind)
+    if tone:
+        w.setProperty('tone', tone)
     return w
 
 
@@ -43,7 +46,7 @@ def panel():
     w = QFrame()
     w.setObjectName('panel')
     layout = QVBoxLayout(w)
-    layout.setContentsMargins(22, 18, 22, 18)
+    layout.setContentsMargins(20, 16, 20, 16)
     layout.setSpacing(12)
     return w, layout
 
@@ -75,7 +78,7 @@ class Metric(QFrame):
         layout.setSpacing(3)
         header = QHBoxLayout()
         name = label(TITLES[key], 'section')
-        name.setStyleSheet(f'color: {COLORS[key]};')
+        name.setProperty('tone', key)
         header.addWidget(name)
         header.addStretch()
         self.status = label('等待采样', 'muted')
@@ -98,11 +101,11 @@ class Metric(QFrame):
         if self.key == 'cpu':
             value = s['cpu']
             self.detail.setText(f"{s['cores']}线程   {temperature(s['temperature'])}")
-            self.status.setText('高负载' if value >= 85 else '实时')
+            self.status.setText('高负载' if value >= 85 else '正常')
         elif self.key == 'memory':
             value = s['memory']['percent']
             self.detail.setText(f"{byte_text(s['memory']['used'])} / {byte_text(s['memory']['total'])}")
-            self.status.setText('使用较高' if value >= 85 else '实时')
+            self.status.setText('使用较高' if value >= 85 else '正常')
         else:
             value = gpu_usage(s)
             if s['gpus']:
@@ -111,7 +114,7 @@ class Metric(QFrame):
                 self.detail.setText(f"{vram}   {temperature(gpu['temperature'])}")
             else:
                 self.detail.setText('打开详情查看采集状态')
-            self.status.setText('高负载' if value is not None and value >= 85 else ('实时' if value is not None else '不可用'))
+            self.status.setText('高负载' if value is not None and value >= 85 else ('正常' if value is not None else '不可用'))
         self.value.setText(f'{value:.1f}%' if value is not None else '—')
         self.chart.update()
 
@@ -129,8 +132,7 @@ class DesktopWidget(QWidget):
         layout.setContentsMargins(22, 15, 22, 18)
         layout.setSpacing(12)
         header = QHBoxLayout()
-        title = label('◉  Pulse', 'section')
-        title.setStyleSheet('color: #90cbff; font-size: 17px;')
+        title = label('Pulse', 'widgetBrand')
         title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         header.addWidget(title)
         header.addStretch()
@@ -149,9 +151,8 @@ class DesktopWidget(QWidget):
         for key in ('cpu', 'memory', 'gpu'):
             col = QVBoxLayout()
             name = label(TITLES[key])
-            name.setStyleSheet(f'color: {COLORS[key]};')
-            value = label('—')
-            value.setStyleSheet('font-size: 24px; font-weight: 600;')
+            name.setProperty('tone', key)
+            value = label('—', 'widgetValue')
             col.addWidget(name)
             col.addWidget(value)
             self.metrics[key] = value
@@ -181,7 +182,6 @@ class DesktopWidget(QWidget):
         bottom.addWidget(self.open_button)
         bottom.addStretch()
         tip = label('拖动顶部移动', 'muted')
-        tip.setStyleSheet('font-size: 11px; color: #a2b3c8;')
         bottom.addWidget(tip)
         layout.addLayout(bottom)
         self.apply_mode()
@@ -214,8 +214,8 @@ class DesktopWidget(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QColor('#172538'))
-        p.setPen(QPen(QColor('#3b516b'), 1))
+        p.setBrush(QColor(theme_color('surface')))
+        p.setPen(QPen(QColor(theme_color('border')), 1))
         p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
 
     def showEvent(self, event):
@@ -276,10 +276,9 @@ class MainWindow(QMainWindow):
     def __init__(self, settings=None):
         super().__init__()
         self.settings = settings or QSettings('Pulse', 'ResourceMonitor')
-        self.history = deque(maxlen=900)
-        self.snapshot = None
-        self.paused = False
+        self.monitor = MonitorState()
         self.current_page = 'overview'
+        self.codex_usage = None
         self.resource_charts = {}
         self.resource_details = {}
         self.setWindowTitle('Pulse · 系统资源监控')
@@ -297,25 +296,31 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(16, 26, 16, 20)
         side.setSpacing(6)
-        brand = label('◉ Pulse')
-        brand.setStyleSheet('font-size: 28px; font-weight: 600; color: #90cbff;')
+        brand = label('Pulse', 'brand')
         side.addWidget(brand)
-        side.addWidget(label('看见电脑的每一次呼吸', 'muted'))
-        side.addSpacing(25)
+        side.addWidget(label('系统资源监控', 'muted'))
+        side.addSpacing(20)
+        side.addWidget(label('资源监控', 'eyebrow'))
         self.nav = {}
-        for key, text in [('overview', '▦   总览'), ('processes', '☷   进程'),
-                          ('cpu', '◈   CPU'), ('memory', '▤   内存'), ('gpu', '◇   GPU'),
-                          ('disk', '▱   磁盘'), ('network', '⇅   网络')]:
+        for key, text in [('overview', '总览'), ('processes', '进程'),
+                          ('cpu', 'CPU'), ('memory', '内存'), ('gpu', 'GPU'),
+                          ('disk', '磁盘'), ('network', '网络')]:
             b = button(text, lambda checked=False, k=key: self.navigate(k), 'nav')
+            b.setIcon(QIcon(str(ROOT/f'assets/icons/{key}.svg')))
+            b.setIconSize(QSize(18, 18))
             b.setCheckable(True)
             self.nav[key] = b
             side.addWidget(b)
         side.addStretch()
-        settings_button = button('⚙   设置与小组件', lambda: self.navigate('settings'), 'nav')
+        settings_button = button('设置与小组件', lambda: self.navigate('settings'), 'nav')
+        settings_button.setIcon(QIcon(str(ROOT/'assets/icons/settings.svg')))
+        settings_button.setIconSize(QSize(18, 18))
         settings_button.setCheckable(True)
         self.nav['settings'] = settings_button
         side.addWidget(settings_button)
-        panel_button = button('▥   顶栏设置', lambda: self.navigate('panel'), 'nav')
+        panel_button = button('顶栏设置', lambda: self.navigate('panel'), 'nav')
+        panel_button.setIcon(QIcon(str(ROOT/'assets/icons/panel.svg')))
+        panel_button.setIconSize(QSize(18, 18))
         panel_button.setCheckable(True)
         self.nav['panel'] = panel_button
         side.addWidget(panel_button)
@@ -324,6 +329,7 @@ class MainWindow(QMainWindow):
         side.addWidget(label('本机采集 · 数据留在本机', 'muted'))
         layout.addWidget(sidebar)
         main = QWidget()
+        main.setObjectName('workspace')
         main_layout = QVBoxLayout(main)
         main_layout.setContentsMargins(28, 24, 28, 16)
         main_layout.setSpacing(16)
@@ -331,10 +337,11 @@ class MainWindow(QMainWindow):
         self.heading = label('系统总览', 'title')
         header.addWidget(self.heading)
         header.addStretch()
-        self.live = label('●  正在采集', 'muted')
-        self.live.setStyleSheet('color: #59d9be;')
+        self.live = label('正在连接采集器', tone='success')
         header.addWidget(self.live)
         self.pause_button = button('暂停显示', self.toggle_pause)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setToolTip('首个采样到达后可暂停显示，后台采集继续运行。')
         header.addWidget(self.pause_button)
         self.widget_button = button('桌面小组件', lambda: self.toggle_widget(not self.widget.isVisible()), 'primary')
         header.addWidget(self.widget_button)
@@ -354,18 +361,32 @@ class MainWindow(QMainWindow):
         self.status = label('等待首个采样…', 'muted')
         footer.addWidget(self.status)
         footer.addStretch()
-        footer.addWidget(label('Ctrl+K 搜索进程   ·   Space 暂停', 'muted'))
+        footer.addWidget(label('Ctrl+K 搜索进程   ·   Ctrl+Space 暂停', 'muted'))
         main_layout.addLayout(footer)
         layout.addWidget(main, 1)
         self.widget = DesktopWidget(self)
         self.widget_check.setChecked(self.settings.value('widget_visible', False, bool))
+        self.change_theme()
         self.navigate('overview')
         self.search_shortcut = QShortcut(QKeySequence('Ctrl+K'), self)
         self.search_shortcut.activated.connect(self.focus_search)
-        self.pause_shortcut = QShortcut(QKeySequence('Space'), self)
+        self.pause_shortcut = QShortcut(QKeySequence('Ctrl+Space'), self)
+        self.pause_shortcut.setAutoRepeat(False)
         self.pause_shortcut.activated.connect(self.toggle_pause)
         if self.settings.value('geometry'):
             self.restoreGeometry(self.settings.value('geometry'))
+
+    @property
+    def history(self):
+        return self.monitor.history
+
+    @property
+    def snapshot(self):
+        return self.monitor.latest
+
+    @property
+    def paused(self):
+        return self.monitor.paused
 
     def add_page(self, key, widget):
         self.pages[key] = widget
@@ -396,40 +417,38 @@ class MainWindow(QMainWindow):
         legends = QHBoxLayout()
         for key in ('cpu', 'memory', 'gpu'):
             legend = label('● '+TITLES[key])
-            legend.setStyleSheet(f'color: {COLORS[key]};')
+            legend.setProperty('tone', key)
             legends.addWidget(legend)
         legends.addStretch()
         area.addLayout(legends)
         self.overview_chart = Chart(['cpu', 'memory', 'gpu'], [COLORS[k] for k in ('cpu', 'memory', 'gpu')], self.history)
         area.addWidget(self.overview_chart, 1)
-        grid.addWidget(trend, 1, 0, 1, 4)
+        grid.addWidget(trend, 2, 0, 1, 4)
         system, info = panel()
         info.addWidget(label('这台电脑', 'section'))
         self.hardware = label('正在读取硬件信息…')
         self.hardware.setWordWrap(True)
-        self.hardware.setStyleSheet('line-height: 1.5; font-size: 12px;')
         info.addWidget(self.hardware, 1)
         info.addWidget(button('仅保留桌面小组件', self.widget_only, 'small'))
-        grid.addWidget(system, 1, 4, 1, 2)
+        grid.addWidget(system, 2, 4, 1, 2)
         self.io_labels = {}
         for key, column, title in [('disk', 0, '磁盘活动'), ('network', 3, '网络活动')]:
             card, content = panel()
             top = QHBoxLayout()
             t = label(title, 'section')
-            t.setStyleSheet(f'color: {COLORS[key]};')
+            t.setProperty('tone', key)
             top.addWidget(t)
             top.addStretch()
             top.addWidget(button('查看详情', lambda checked=False, k=key: self.navigate(k), 'small'))
             content.addLayout(top)
-            value = label('—')
-            value.setStyleSheet('font-size: 19px; font-weight: 500;')
+            value = label('—', 'ioValue')
             content.addWidget(value)
             detail = label('等待采样', 'muted')
             detail.setWordWrap(True)
             content.addWidget(detail)
             self.io_labels[key] = value, detail
-            grid.addWidget(card, 2, column, 1, 3)
-        grid.setRowStretch(1, 1)
+            grid.addWidget(card, 3, column, 1, 3)
+        grid.setRowStretch(2, 1)
         for col in range(6):
             grid.setColumnStretch(col, 1)
         page.setMinimumHeight(650)
@@ -437,6 +456,78 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(page)
         self.add_page('overview', scroll)
+
+        quota, content = panel()
+        heading = QHBoxLayout()
+        heading.addWidget(label('Codex额度', 'section'))
+        heading.addStretch()
+        self.quota_account = label('正在读取当前账号…', 'muted')
+        heading.addWidget(self.quota_account)
+        content.addLayout(heading)
+        rows = QHBoxLayout()
+        self.quota_rows = []
+        for _ in range(2):
+            column = QVBoxLayout()
+            title = label('等待额度数据')
+            bar = QProgressBar()
+            bar.setRange(0, 1000)
+            bar.setValue(0)
+            bar.setFormat('—')
+            reset = label('等待重置时间', 'muted')
+            column.addWidget(title)
+            column.addWidget(bar)
+            column.addWidget(reset)
+            rows.addLayout(column, 1)
+            self.quota_rows.append((title, bar, reset))
+        content.addLayout(rows)
+        self.quota_status = label('通过本机Codex查询 · 每60秒自动刷新', 'muted')
+        self.quota_status.setWordWrap(True)
+        content.addWidget(self.quota_status)
+        grid.addWidget(quota, 1, 0, 1, 6)
+        self.quota_timer = QTimer(self)
+        self.quota_timer.timeout.connect(self.render_usage)
+        self.quota_timer.start(1000)
+
+    def receive_usage(self, result):
+        self.codex_usage = result
+        self.render_usage()
+
+    def render_usage(self):
+        result = self.codex_usage
+        if result is None:
+            return
+        if 'error' in result:
+            self.quota_account.setText('额度不可用')
+            self.quota_status.setText(result['error'])
+            for title, bar, reset in self.quota_rows:
+                title.setText('暂无额度读数')
+                bar.setValue(0)
+                bar.setFormat('—')
+                reset.setText('等待下次查询')
+            return
+        self.quota_account.setText(f"{result['email']} · {result['plan'].capitalize()}")
+        for (title, bar, reset), window in zip(self.quota_rows, result['windows']):
+            if window is None:
+                title.setText('未提供额度窗口')
+                bar.setValue(0)
+                bar.setFormat('—')
+                reset.setText('服务未返回此项')
+                continue
+            minutes = window['minutes']
+            period = '每周' if minutes == 10080 else (f'{minutes/60:g}小时' if minutes and minutes % 60 == 0 else (f'{minutes:g}分钟' if minutes else '当前周期'))
+            title.setText(f"{period}剩余 {window['remaining']:g}%")
+            bar.setValue(round(window['remaining']*10))
+            bar.setFormat(f"{window['remaining']:g}%")
+            stamp = window['resets_at']
+            if stamp is None:
+                reset.setText('服务未提供重置时间')
+            elif stamp <= time.time():
+                reset.setText('已到重置时间，等待下次查询')
+            else:
+                reset.setText(f"{duration(stamp-time.time())}后重置")
+            reset.setToolTip(datetime.fromtimestamp(stamp).strftime('重置于%Y-%m-%d %H:%M:%S') if stamp else '')
+        stamp = datetime.fromtimestamp(result['updated_at']).strftime('%H:%M:%S')
+        self.quota_status.setText(f'官方Codex订阅额度 · 更新于{stamp} · 每60秒刷新')
 
     def build_processes(self):
         page, content = panel()
@@ -449,7 +540,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.process_count)
         content.addLayout(bar)
         self.process_model = ProcessModel()
-        self.proxy = QSortFilterProxyModel(self)
+        self.proxy = ProcessSortProxy(self)
         self.proxy.setSourceModel(self.process_model)
         self.proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.proxy.setFilterKeyColumn(-1)
@@ -484,26 +575,28 @@ class MainWindow(QMainWindow):
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(16)
         graph, area = panel()
-        self.resource_details[key] = label('等待采样', 'section')
+        area.addWidget(label('当前读数', 'eyebrow'))
+        self.resource_details[key] = label('等待首个采样…', 'resourceValue', tone=key)
         self.resource_details[key].setWordWrap(True)
         area.addWidget(self.resource_details[key])
         keys = {'disk': ['read', 'write'], 'network': ['down', 'up']}.get(key, [key])
-        colors = [COLORS[key], '#e0a6c7'] if len(keys) == 2 else [COLORS[key]]
+        colors = [COLORS[key], 'secondary'] if len(keys) == 2 else [COLORS[key]]
         if len(keys) == 2:
             legend = QHBoxLayout()
             for text, color in zip(('读取', '写入') if key == 'disk' else ('下载', '上传'), colors):
                 l = label('● '+text)
-                l.setStyleSheet(f'color: {color};')
+                l.setProperty('tone', color)
                 legend.addWidget(l)
             legend.addStretch()
             area.addLayout(legend)
         chart = Chart(keys, colors, self.history, percent=key not in ('disk', 'network'))
         self.resource_charts[key] = chart
         area.addWidget(chart, 1)
-        content.addWidget(graph, 3)
+        chart.setMaximumHeight(250)
+        content.addWidget(graph)
         if key == 'cpu':
             cores, core_layout = panel()
-            core_layout.addWidget(label('每个逻辑核心的实时利用率', 'section'))
+            core_layout.addWidget(label('各逻辑核心利用率', 'section'))
             core_layout.addWidget(label('CPU编号与操作系统一致，每格独立使用0–100%刻度。', 'muted'))
             self.cpu_grid = CoreGrid()
             core_layout.addWidget(self.cpu_grid)
@@ -514,12 +607,11 @@ class MainWindow(QMainWindow):
             self.gpu_gauge = UsageGauge(COLORS['gpu'], 110)
             row.addWidget(self.gpu_gauge)
             values = QVBoxLayout()
-            values.addWidget(label('GPU 0实时利用率', 'section'))
+            values.addWidget(label('GPU 0利用率', 'section'))
             values.addWidget(label('圆环表示计算利用率，进度条表示显存占用。', 'muted'))
             self.vram_bar = QProgressBar()
             self.vram_bar.setRange(0, 1000)
             self.vram_bar.setFixedHeight(26)
-            self.vram_bar.setStyleSheet('QProgressBar {background:#20354c; border:none; border-radius:6px; text-align:center;} QProgressBar::chunk {background:#367e72; border-radius:6px;}')
             values.addWidget(self.vram_bar)
             row.addLayout(values, 1)
             gauge_layout.addLayout(row)
@@ -528,11 +620,11 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.resource_body = getattr(self, 'resource_body', {})
-        self.resource_body[key] = label('正在读取…')
+        detail_layout.addWidget(label({'cpu': '处理器信息', 'memory': '内存分配', 'gpu': '显卡信息', 'disk': '挂载点与容量', 'network': '网络接口'}[key], 'section'))
+        self.resource_body[key] = label('等待首个采样后显示硬件数据。', 'resourceBody')
         self.resource_body[key].setWordWrap(True)
         self.resource_body[key].setAlignment(Qt.AlignmentFlag.AlignTop)
         self.resource_body[key].setTextFormat(Qt.TextFormat.PlainText)
-        self.resource_body[key].setStyleSheet('font-size: 14px; background: #172538; padding: 6px;')
         scroll.setWidget(self.resource_body[key])
         detail_layout.addWidget(scroll)
         content.addWidget(detail_panel, 2)
@@ -551,6 +643,22 @@ class MainWindow(QMainWindow):
         content = QVBoxLayout(page)
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(16)
+        appearance, appearance_layout = panel()
+        appearance_layout.addWidget(label('外观主题', 'section'))
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(label('主题'))
+        theme_row.addStretch()
+        self.theme_combo = QComboBox()
+        for key, title in THEMES.items():
+            self.theme_combo.addItem(title, key)
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(self.settings.value('theme', 'ocean'))))
+        self.theme_combo.currentIndexChanged.connect(self.change_theme)
+        theme_row.addWidget(self.theme_combo)
+        appearance_layout.addLayout(theme_row)
+        theme_note = label('主窗口与桌面小组件同步换色，自动保存。顶栏跟随系统主题。', 'muted')
+        theme_note.setWordWrap(True)
+        appearance_layout.addWidget(theme_note)
+        content.addWidget(appearance)
         sampling, s = panel()
         s.addWidget(label('采样与显示', 'section'))
         row = QHBoxLayout()
@@ -608,7 +716,15 @@ class MainWindow(QMainWindow):
         start.addWidget(self.settings_notice)
         content.addWidget(startup)
         content.addStretch()
-        self.add_page('settings', page)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        self.add_page('settings', scroll)
+
+    def change_theme(self):
+        name = apply_theme(QApplication.instance(), self.theme_combo.currentData())
+        self.settings.setValue('theme', name)
+        self.settings.sync()
 
     def build_panel_settings(self):
         page = QWidget()
@@ -617,6 +733,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
         config = read_panel(self.settings)
+        connection, connection_layout = panel()
+        connection_layout.addWidget(label('顶栏组件状态', 'section'))
+        self.panel_status = label()
+        self.panel_status.setWordWrap(True)
+        connection_layout.addWidget(self.panel_status)
+        self.panel_enable = button('启用Pulse顶栏组件', self.enable_panel)
+        connection_layout.addWidget(self.panel_enable)
+        layout.addWidget(connection)
+        self.panel_status_timer = QTimer(self)
+        self.panel_status_timer.timeout.connect(self.refresh_panel_status)
+        self.panel_status_timer.start(2000)
+        self.refresh_panel_status()
         appearance, form = panel()
         form.addWidget(label('位置与样式', 'section'))
         self.panel_position = QComboBox()
@@ -660,7 +788,7 @@ class MainWindow(QMainWindow):
             self.panel_fields[key] = checkbox
             grid.addWidget(checkbox, i//3, i%3)
         content.addLayout(grid)
-        note = label('趋势图显示最近60秒；负载条样式用独立小柱表示每个CPU逻辑核心，GPU和内存显示占用条。全部取消时保留菜单入口。K/M表示KiB/s、MiB/s。', 'muted')
+        note = label('趋势图显示最近60秒；负载条样式用独立小柱表示每个CPU逻辑核心，GPU和内存显示占用条。Codex额度使用双行小字与进度条：5小时为金色，一周为粉色，条长表示剩余额度。全部取消时保留菜单入口。K/M表示KiB/s、MiB/s。', 'muted')
         note.setWordWrap(True)
         content.addWidget(note)
         layout.addWidget(fields)
@@ -674,6 +802,24 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         self.add_page('panel', page)
         self.update_panel_preview()
+
+    def refresh_panel_status(self):
+        marker = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))/'pulse-panel-native.json'
+        try:
+            active = time.time()-marker.stat().st_mtime < 12
+        except FileNotFoundError:
+            active = False
+        self.panel_status.setText('原生顶栏已连接，位置与图形设置实时生效。' if active else
+                                  '原生顶栏未连接。备用入口固定在右侧；移动位置和显示图形需要启用Pulse顶栏组件。')
+        self.panel_enable.setVisible(not active)
+
+    def enable_panel(self):
+        result = subprocess.run(['gnome-extensions', 'enable', 'pulse-panel@local'], capture_output=True, text=True)
+        if result.returncode:
+            self.panel_status.setText('启用失败：'+result.stderr.strip())
+        else:
+            self.panel_status.setText('正在连接原生顶栏组件…')
+            QTimer.singleShot(2000, self.refresh_panel_status)
 
     def update_panel_preview(self):
         config = read_panel(self.settings)
@@ -710,18 +856,13 @@ class MainWindow(QMainWindow):
             'disk': '整机物理磁盘吞吐与各挂载点容量。',
             'network': '活动物理网卡总速率与各接口流量。',
         }[key])
-        display = self.paused_snapshot if self.paused else self.snapshot
+        display = self.monitor.display
         if display:
             self.render_snapshot(display)
-            if self.paused:
-                self.live.setText('Ⅱ  显示已暂停')
 
     def receive(self, s):
-        self.snapshot = s
-        self.history.append(dict(time=s['time'], cpu=s['cpu'], memory=s['memory']['percent'], gpu=gpu_usage(s),
-                                 read=s['disk']['read'], write=s['disk']['write'], down=s['network']['down'], up=s['network']['up']))
-        while self.history and s['time']-self.history[0]['time'] > 300:
-            self.history.popleft()
+        self.monitor.receive(s)
+        self.pause_button.setEnabled(True)
         if self.widget.isVisible():
             self.widget.refresh(s)
         if self.isVisible() and not self.paused:
@@ -745,8 +886,8 @@ class MainWindow(QMainWindow):
         elif self.current_page in TITLES:
             self.render_resource(self.current_page, s)
         stamp = datetime.fromtimestamp(s['wall_time']).strftime('%H:%M:%S')
-        self.status.setText(f"{s['hostname']}   更新于{stamp}   {len(s['processes'])}个可读取进程")
-        self.live.setText('●  实时更新')
+        self.status.setText(f"{s['hostname']}   {'快照时间' if self.paused else '更新于'}{stamp}   {len(s['processes'])}个可读取进程")
+        self.live.setText('已暂停 · 后台采集中' if self.paused else '实时更新')
 
     def render_resource(self, key, s):
         m = s['memory']
@@ -818,15 +959,15 @@ class MainWindow(QMainWindow):
         self.search.setFocus()
 
     def toggle_pause(self):
-        self.paused = not self.paused
-        self.paused_snapshot = self.snapshot
+        self.monitor.toggle_pause()
         charts = [self.overview_chart, *self.resource_charts.values(), *(m.chart for m in self.metrics.values())]
         for chart in charts:
-            chart.history = deque(self.history) if self.paused else self.history
+            chart.history = self.monitor.frozen_history if self.paused else self.history
         self.pause_button.setText('继续显示' if self.paused else '暂停显示')
-        self.live.setText('Ⅱ  显示已暂停' if self.paused else '●  实时更新')
-        if not self.paused and self.snapshot:
-            self.render_snapshot(self.snapshot)
+        if self.monitor.display:
+            self.render_snapshot(self.monitor.display)
+        for chart in charts:
+            chart.update()
 
     def change_range(self):
         seconds = self.range_combo.currentData()
@@ -897,8 +1038,8 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        if self.snapshot and not self.paused:
-            self.render_snapshot(self.snapshot)
+        if self.monitor.display:
+            self.render_snapshot(self.monitor.display)
 
     def closeEvent(self, event):
         self.settings.setValue('geometry', self.saveGeometry())

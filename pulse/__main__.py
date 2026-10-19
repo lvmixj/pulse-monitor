@@ -15,6 +15,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
 from .collector import Collector
+from .codex_usage import UsagePoller
 from .theme import STYLE
 from .ui import MainWindow
 from .panel_config import read_panel
@@ -134,6 +135,9 @@ def main():
     sampler.failed.connect(lambda message: (logging.error(message), app.exit(1)))
     window.interval_changed.connect(sampler.set_interval)
     app.aboutToQuit.connect(sampler.stop)
+    usage = UsagePoller()
+    usage.updated.connect(window.receive_usage)
+    app.aboutToQuit.connect(usage.stop)
     app.aboutToQuit.connect(lambda: window.settings.setValue('widget_pos', window.widget.pos()))
     app.aboutToQuit.connect(lambda: window.settings.setValue('geometry', window.saveGeometry()))
     runtime = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
@@ -152,7 +156,11 @@ def main():
         latest['widget_visible'] = window.widget.isVisible()
         latest['window_visible'] = window.isVisible()
         latest['page'] = window.current_page
+        latest['display'] = dict(paused=window.paused, ready=window.monitor.display is not None,
+                                 theme=window.settings.value('theme', 'ocean'))
         latest['panel'] = read_panel(window.settings)
+        quota = window.codex_usage or {}
+        latest['codex_usage'] = {key: quota[key] for key in ('windows', 'updated_at', 'error') if key in quota}
         temporary = snapshot_path.with_suffix('.tmp')
         temporary.write_text(json.dumps(latest))
         temporary.chmod(0o600)
@@ -206,6 +214,7 @@ def main():
         if window.settings.value('widget_visible', False, bool):
             window.toggle_widget(True)
     sampler.start()
+    usage.start()
     logging.info('Pulse backend ready, PID=%s, background=%s', os.getpid(), args.background)
     return app.exec()
 

@@ -64,6 +64,26 @@ function graph(color, height = 20, width = 50) {
     return area;
 }
 
+function quotaBar(color) {
+    const area = new St.DrawingArea({width: 42, height: 4, y_align: Clutter.ActorAlign.CENTER});
+    area.remaining = null;
+    area.color = color;
+    area.connect('repaint', () => {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        cr.setSourceRGBA(1, 1, 1, 0.16);
+        cr.rectangle(0, 0, w, h);
+        cr.fill();
+        if (area.remaining !== null) {
+            cr.setSourceRGBA(...area.color, 1);
+            cr.rectangle(0, 0, w*area.remaining/100, h);
+            cr.fill();
+        }
+        cr.$dispose();
+    });
+    return area;
+}
+
 const Indicator = GObject.registerClass({GTypeName: 'PulseNativePanelIndicatorV2'}, class Indicator extends PanelMenu.Button {
     _init() {
         super._init(0.0, 'Pulse系统资源监控');
@@ -86,6 +106,19 @@ const Indicator = GObject.registerClass({GTypeName: 'PulseNativePanelIndicatorV2
             this._row.add_child(box);
             this._metrics[key] = {box, text, chart};
         }
+        this._quota = new St.BoxLayout({vertical: true, y_align: Clutter.ActorAlign.CENTER});
+        this._quotaRows = [];
+        for (const [name, color] of [['5小时', [0.91, 0.74, 0.44]], ['一周', [0.91, 0.60, 0.72]]]) {
+            const row = new St.BoxLayout({style: 'spacing: 5px;'});
+            const text = new St.Label({text: `${name}—`, style: 'font-size: 10px; min-width: 60px;'});
+            const bar = quotaBar(color);
+            row.add_child(text);
+            row.add_child(bar);
+            this._quota.add_child(row);
+            this._quotaRows.push({name, color, text, bar});
+        }
+        this._quota.hide();
+        this._row.add_child(this._quota);
         this._summary = new PopupMenu.PopupMenuItem('正在连接后台', {reactive: false});
         this.menu.addMenuItem(this._summary);
         for (const key of ['cpu', 'gpu']) {
@@ -131,7 +164,8 @@ const Indicator = GObject.registerClass({GTypeName: 'PulseNativePanelIndicatorV2
                 this._brand.text = 'Ⅱ';
             }
         });
-        const marker = JSON.stringify({updated: Date.now(), position: this._position, lastTime: this._lastTime, style: this._style, fields: this._visibleFields, x: this.get_transformed_position()[0]});
+        const marker = JSON.stringify({updated: Date.now(), position: this._position, lastTime: this._lastTime, style: this._style, fields: this._visibleFields, x: this.get_transformed_position()[0],
+            codex: {visible: this._quota.visible, labels: this._quotaRows.map(row => row.text.text), remaining: this._quotaRows.map(row => row.bar.remaining)}});
         this._marker.replace_contents_bytes_async(new GLib.Bytes(ByteArray.fromString(marker)), null, false, Gio.FileCreateFlags.PRIVATE, null, (file, result) => {
             try { file.replace_contents_finish(result); } catch (error) { logError(error, 'Pulse panel heartbeat'); }
         });
@@ -172,6 +206,20 @@ const Indicator = GObject.registerClass({GTypeName: 'PulseNativePanelIndicatorV2
                 metric.chart.queue_repaint();
             }
         }
+        this._quota.visible = !!config.fields.codex;
+        const quota = data.codex_usage;
+        const fresh = quota && !quota.error && Date.now()/1000-quota.updated_at < 180;
+        this._quotaRows.forEach((row, index) => {
+            const window = fresh && quota.windows ? quota.windows[index] : null;
+            const remaining = window && Number.isFinite(window.remaining) ? Math.max(0, Math.min(100, window.remaining)) : null;
+            row.text.text = `${row.name}${remaining === null ? '—' : `${Math.round(remaining)}%`}`;
+            const color = config.color ? row.color : [0.9, 0.94, 1];
+            row.text.set_style(`font-size: 10px; min-width: 60px; color: rgb(${color.map(v => Math.round(v*255)).join(',')});`);
+            row.bar.color = color;
+            row.bar.width = config.width;
+            row.bar.remaining = remaining;
+            row.bar.queue_repaint();
+        });
         for (const key of ['cpu', 'gpu']) {
             this[`_${key}Chart`].samples = this._history[key];
             this[`_${key}Chart`].queue_repaint();

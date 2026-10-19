@@ -17,7 +17,7 @@ os.environ['XDG_DATA_HOME'] = str(Path(_USER.name)/'data')
 from PySide6.QtCore import QSettings, QSortFilterProxyModel, Qt
 from PySide6.QtWidgets import QApplication
 from pulse.collector import Collector
-from pulse.processes import ProcessModel
+from pulse.processes import ProcessModel, ProcessSortProxy
 from pulse.theme import STYLE
 from pulse.ui import MainWindow
 
@@ -82,6 +82,19 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual([proxy.index(i, 1).data(Qt.ItemDataRole.UserRole) for i in range(3)], [10, 3, 2])
         proxy.sort(3, Qt.SortOrder.DescendingOrder)
         self.assertEqual([proxy.index(i, 1).data(Qt.ItemDataRole.UserRole) for i in range(3)], [3, 2, 10])
+
+    def test_rss_sort_across_signed_32_bit_boundary(self):
+        model = ProcessModel()
+        values = [0, 64*1024**2, 2**31-1, 2**31, 3*1024**3, 2**32+1]
+        model.replace([dict(name='p', pid=i, cpu=0., memory=value, user='u', status='running')
+                       for i, value in enumerate(values)])
+        proxy = ProcessSortProxy()
+        proxy.setSourceModel(model)
+        proxy.setSortRole(Qt.ItemDataRole.UserRole)
+        for order in (Qt.SortOrder.DescendingOrder, Qt.SortOrder.AscendingOrder):
+            proxy.sort(3, order)
+            self.assertEqual([proxy.index(i, 3).data(Qt.ItemDataRole.UserRole) for i in range(len(values))],
+                             sorted(values, reverse=order == Qt.SortOrder.DescendingOrder))
 
     def test_every_page_and_widget_render_without_gpu(self):
         settings = QSettings(str(Path(_USER.name)/'ui.ini'), QSettings.Format.IniFormat)

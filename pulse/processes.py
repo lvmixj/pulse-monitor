@@ -1,6 +1,16 @@
-from PySide6.QtCore import QAbstractTableModel, Qt
+from PySide6.QtCore import QAbstractTableModel, QSortFilterProxyModel, Qt
 from PySide6.QtGui import QColor
 from .collector import byte_text
+from .theme import color as theme_color
+
+
+class ProcessSortProxy(QSortFilterProxyModel):
+    def lessThan(self, left, right):
+        if left.column() in (1, 2, 3):
+            # Compare Python numbers directly: RSS values cross QVariant's
+            # signed 32-bit boundary when a process uses more than 2 GiB.
+            return left.data(Qt.ItemDataRole.UserRole) < right.data(Qt.ItemDataRole.UserRole)
+        return super().lessThan(left, right)
 
 
 class ProcessModel(QAbstractTableModel):
@@ -40,7 +50,7 @@ class ProcessModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.TextAlignmentRole and key in ('cpu', 'memory', 'pid'):
             return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         if role == Qt.ItemDataRole.ForegroundRole and key == 'cpu' and value >= 10:
-            return QColor('#62b5ff')
+            return QColor(theme_color('cpu'))
         if role == Qt.ItemDataRole.ToolTipRole:
             return 'CPU按全部逻辑核心归一化，100%代表整机CPU满载。' if key == 'cpu' else str(value)
 

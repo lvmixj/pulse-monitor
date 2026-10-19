@@ -4,7 +4,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
-from .theme import MUTED
+from .theme import color as theme_color
 
 
 class Chart(QWidget):
@@ -27,11 +27,11 @@ class Chart(QWidget):
         top = 100 if self.percent else max(1024, max(values, default=0)*1.2)
         if not self.compact:
             p.setFont(QFont('Noto Sans CJK SC', 8))
-            p.setPen(QPen(QColor('#2c4057'), 1, Qt.PenStyle.DashLine))
+            p.setPen(QPen(QColor(theme_color('grid')), 1, Qt.PenStyle.DashLine))
             for fraction in (0, .25, .5, .75, 1):
                 y = plot.bottom()-plot.height()*fraction
                 p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-            p.setPen(QColor(MUTED))
+            p.setPen(QColor(theme_color('muted')))
             for fraction in (0, .5, 1):
                 value = top*fraction
                 label = f'{value:.0f}%' if self.percent else self.rate_axis(value)
@@ -61,15 +61,15 @@ class Chart(QWidget):
                 fill.lineTo(points[0].x(), plot.bottom())
                 fill.closeSubpath()
                 gradient = QLinearGradient(0, plot.top(), 0, plot.bottom())
-                tint = QColor(color)
+                tint = QColor(theme_color(color))
                 tint.setAlpha(55)
                 gradient.setColorAt(0, tint)
                 tint.setAlpha(2)
                 gradient.setColorAt(1, tint)
                 p.fillPath(fill, gradient)
-                p.setPen(QPen(QColor(color), 2))
+                p.setPen(QPen(QColor(theme_color(color)), 2))
                 p.drawPath(path)
-                p.setBrush(QColor(color))
+                p.setBrush(QColor(theme_color(color)))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawEllipse(points[-1], 2.5, 2.5)
         p.end()
@@ -98,12 +98,12 @@ class UsageGauge(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(7, 7, -7, -7)
-        p.setPen(QPen(QColor('#30465f'), 7))
+        p.setPen(QPen(QColor(theme_color('track')), 7))
         p.drawEllipse(rect)
         if self.value is not None:
-            p.setPen(QPen(QColor(self.color), 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setPen(QPen(QColor(theme_color(self.color)), 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(rect, 90*16, -round(max(0, min(100, self.value))*3.6*16))
-        p.setPen(QColor('#e6edf7'))
+        p.setPen(QColor(theme_color('text')))
         font = QFont('Noto Sans CJK SC', 15)
         font.setBold(True)
         p.setFont(font)
@@ -143,9 +143,9 @@ class CoreGrid(QWidget):
         for i, value in enumerate(self.values):
             rect = QRectF((i%cols)*width+2, (i//cols)*height+2, width-5, height-5)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor('#20354c'))
+            p.setBrush(QColor(theme_color('control')))
             p.drawRoundedRect(rect, 5, 5)
-            p.setPen(QColor('#d3e5f8'))
+            p.setPen(QColor(theme_color('text')))
             p.setFont(QFont('Noto Sans CJK SC', 7 if self.compact else 9))
             if self.compact:
                 p.drawText(rect.adjusted(0, 0, 0, -9), Qt.AlignmentFlag.AlignCenter, f'{i}: {value:.0f}%')
@@ -154,9 +154,9 @@ class CoreGrid(QWidget):
                 p.drawText(rect.adjusted(8, 3, -8, -20), Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter, f'{value:.0f}%')
             bar = rect.adjusted(6, rect.height()-10, -6, -5)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor('#354b63'))
+            p.setBrush(QColor(theme_color('track')))
             p.drawRoundedRect(bar, 2, 2)
-            p.setBrush(QColor('#ffc17b' if value >= 85 else '#62b5ff'))
+            p.setBrush(QColor(theme_color('warning' if value >= 85 else 'cpu')))
             p.drawRoundedRect(QRectF(bar.left(), bar.top(), bar.width()*value/100, bar.height()), 2, 2)
 
     def mouseMoveEvent(self, event):

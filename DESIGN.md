@@ -40,3 +40,25 @@ CPU详情与小组件按操作系统CPU编号显示每个逻辑核心，固定0�
 ## 顶栏图形与设置
 
 范围限定于顶栏组件及其设置。保留主窗口和桌面小组件原有图形。顶栏默认左侧，CPU蓝、GPU青绿、内存紫；图形与数字并排。趋势图使用真实60秒时间轴、0–100%固定刻度；负载条模式用CPU逐逻辑核心小柱和GPU占用条；纯数字模式压缩横向空间。资源项目可逐项隐藏，全部隐藏时保留菜单入口。参考Mission Center、btop与nvtop的监控表达，保留Pulse现有视觉语言。
+
+## 2026-10-19界面与分层修复
+
+本轮按ui-ux-pro-max的桌面监控设计流程检索：`system monitoring desktop dashboard --design-system --density 8`返回实时运营模式，采用其真实更新时间、暂停控制和语义颜色建议；补充`operations dashboard dense minimal --domain style`命中Minimalism & Swiss Style，采用紧凑网格、清晰层级与低动画。工具不含PySide6栈，Qt实现依据官方文档。
+
+布局保留资源导航与总览网格，统一使用10px面板圆角、16px面板间距、20px内容内边距和一套SVG线性导航图标。详情页将当前读数、固定上限250px的趋势图及硬件详情分层显示。设置页整体滚动，适配980×740最小桌面窗口。三套主题使用同一份字体、布局和交互规则，正文与状态色按4.5:1检查。
+
+- `collector.py`与`Sampler`负责真实采样，不导入主题。
+- `state.py::MonitorState`只保存最新采样、历史、暂停快照，不依赖Qt或主题。
+- `ui.py`负责数据绑定、导航和用户操作。主题选择只调用换肤并保存`theme`偏好。
+- `theme.py`只提供不可变的具名颜色、统一QSS和重绘入口。删除全控件遍历、内联样式缓存、十六进制颜色替换以及全局可变主题变量。
+- 图表仅在绘制时读取`cpu`、`memory`、`surface`等语义颜色，数值和历史来自监控状态层。
+
+空白页复现路径：首个采样到达前暂停，将None保存为冻结快照，后续接收采样时主窗口持续保持空状态。修复为首个采样前禁用暂停按钮，状态层也拒绝冻结空数据。暂停后切换页面始终绑定冻结快照，继续显示后恢复最新采样。暂停快捷键使用Ctrl+Space，普通空格交还下拉框和搜索框。
+
+验证包含暂停前启动、暂停中换肤、所有资源页导航、小组件实时更新、恢复显示、重新启动、三主题文字对比度和超过2GiB的进程内存排序；报告位于`artifacts/theme-verification.json`。Qt默认跨Int/LongLong排序在本机进程内存超过2GiB时出现错序，采用官方`lessThan`接口按Python数值比较。
+
+参考：
+- https://doc.qt.io/qt-6/model-view-programming.html
+- https://doc.qt.io/qtforpython-6/PySide6/QtGui/QShortcut.html
+- https://doc.qt.io/qtforpython-6/PySide6/QtCore/QSortFilterProxyModel.html
+- https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html
